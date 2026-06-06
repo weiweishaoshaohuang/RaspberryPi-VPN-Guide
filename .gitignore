@@ -5,6 +5,7 @@ id_rsa
 id_rsa.pub
 *.pem
 *.key
+草稿.md
 
 # DuckDNS runtime log (generated locally on the Pi)
 duck.log

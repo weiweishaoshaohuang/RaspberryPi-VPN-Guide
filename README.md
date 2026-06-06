@@ -477,6 +477,117 @@ timeout                                             # ❌ 443 被封，檢查 Po
 
 ---
 
+## 常見問題排除
+
+### 問題一：TUN 模式出現 `context deadline exceeded`（路由迴圈）
+
+**症狀**：開啟 TUN 模式後，v2rayN 日誌不斷出現 `context deadline exceeded`，網路完全斷開。
+
+**根本原因**：
+
+系統代理模式下，App 是「主動選擇」把請求丟給 v2ray 本地 port，v2ray 的出站流量不會被自己攔截，運作正常：
+
+```
+App 想連 Google
+  ↓
+App 把請求丟給 v2ray 本地 port（如 1080）
+  ↓
+v2ray 的 process 直接連到 YOUR_PI_PUBLIC_IP:443（走正常網卡）
+  ↓
+Pi → Google
+```
+
+TUN 模式則會接管整張路由表，導致 v2ray 的出站封包也被自己攔截，形成無限迴圈：
+
+```
+v2ray 想連 YOUR_PI_PUBLIC_IP:443
+  ↓
+封包進入 OS 網路層
+  ↓
+路由表：所有 IP 走 tun0（虛擬網卡）
+  ↓
+封包被 v2ray 自己讀到 → 「這要送去 YOUR_PI_PUBLIC_IP:443」→ 再送一次
+  ↓
+無限迴圈 → Context deadline exceeded
+```
+
+**解決方式**：在路由規則中為 VPN 伺服器加一條 `direct` 規則，讓 v2ray 的出站流量繞過 tun0：
+
+v2rayN → **設定** → **路由規則設定** → 新增一條規則：
+
+| 欄位 | 值 |
+|---|---|
+| 備註 | `bypass-vpn-server` |
+| Domain | `your-domain.duckdns.org` |
+| 出站 | `direct` |
+
+儲存後重啟核心。加了此規則後：
+
+```
+v2ray 想連 your-domain.duckdns.org:443
+  ↓
+路由規則命中：direct → 走真實網卡，不進 tun0
+  ↓
+正常連線成功
+```
+
+---
+
+### 問題二：未設定 `flow`，流量在 GFW 下特徵明顯
+
+**症狀**：連線可用，但在大陸網路環境下容易被干擾或封鎖。
+
+**根本原因**：
+
+未設定 flow 時，連線 Google（HTTPS）的流量結構是 TLS 包著 TLS：
+
+```
+外層：VLESS + REALITY（TLS）
+  └─ 內層：Google 的 HTTPS（也是 TLS）
+```
+
+正常瀏覽器不會產生雙層 TLS 結構，GFW 的深度包檢測從統計特徵就能識別這是代理流量。
+
+`xtls-rprx-vision` 的解法是在 REALITY 握手完成後，直接將內層 TLS 原始封包「拼接」進去，消除雙層 TLS 特徵：
+
+```
+外層 REALITY 握手完成後
+  ↓
+內層 TLS 原始封包直接拼接（不再雙重封裝）
+  ↓
+GFW 看到的是：完整的 Yahoo TLS 握手 + 正常的 TLS 應用資料
+  ↓
+無法與真實 Yahoo 流量區分
+```
+
+**解決方式（Server 和 Client 必須同時設定）**：
+
+#### Server 端（樹莓派）
+
+直接用 sqlite3 更新資料庫設定，再重啟 x-ui：
+
+```bash
+sudo sqlite3 /etc/x-ui/x-ui.db \
+  "UPDATE inbounds SET settings = json_set(settings, '$.clients[0].flow', 'xtls-rprx-vision') WHERE id = 1;"
+sudo systemctl restart x-ui
+```
+
+#### Client 端
+
+**手機（v2rayNG）**：長按伺服器設定 → 編輯 → 找到 **Flow** 欄位，填入 `xtls-rprx-vision` → 儲存
+
+**電腦（v2rayN）**：伺服器列表雙擊編輯 → **流控** 欄位填入 `xtls-rprx-vision` → 儲存
+
+#### 驗證是否生效
+
+Flow 有個特性：Server 和 Client 必須同時設或同時不設，否則直接連不上。
+
+1. Client 設好 `xtls-rprx-vision` 後，確認可以正常連線
+2. 故意把 Client 的 flow 清空，測試連線
+3. 清空後若連不上 → 代表 Server 確實在強制要求 flow，兩端均已生效
+
+---
+
 ## 附錄：名詞解釋
 
 ### GFW 的識別手段
