@@ -1,20 +1,17 @@
 <div align="center">
 
-# 基於 Raspberry Pi 4 的跨地域私有網路基礎設施與縱深防禦實踐
+# 使用 Raspberry Pi 4 海外自建VPN
 
-**Self-Hosted Cross-Border VPN Infrastructure with VLESS-REALITY & Tailscale on Raspberry Pi 4**
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Raspberry%20Pi%204-c51a4a)](https://www.raspberrypi.com/)
-[![OS](https://img.shields.io/badge/OS-Ubuntu%2024.04%20LTS-E95420)](https://ubuntu.com/)
-[![Protocol](https://img.shields.io/badge/Protocol-VLESS%20%2B%20REALITY-4A90D9)]()
-[![Mesh VPN](https://img.shields.io/badge/Mesh%20VPN-Tailscale%20%2F%20WireGuard-23C4C4)](https://tailscale.com/)
-
-> 以家用樹莓派 4 作為出口節點，部署目前對 GFW 隱蔽性最高的 **VLESS + REALITY** 翻牆代理，
+> 這裡**硬體**以**家用樹莓派 4** 作為出口節點
+>
+> (其實**不一定要侷限於樹梅派**,任何可以上網且有CPU的硬體都可以拿來跑,比方說家裡不用的舊電腦、MAC...)
+>
+> 部署目前對 GFW 隱蔽性最高的 **VLESS + REALITY** 翻牆代理，
 > 並搭配 **Tailscale** Mesh VPN、SSH 金鑰加固、DuckDNS 動態域名的完整工程實踐紀錄。
+> 
 >
 > **適合族群：**
-> - 海外華人（在美、歐、澳等地有家用寬頻，想把家裡的出口 IP 作為私人節點）
+> - 海外華人（在美、歐、澳等地有家用寬頻，想把家裡的出口 IP 作為私人節點）或是有海外VPS用戶
 > - 有需要翻牆的用戶，且對「把流量交給陌生 VPS / 機場」感到不安
 > - 想自建節點、擺脫商業機場的工程師與技術愛好者
 > - 對家用網路安全架構、GFW 對抗技術有研究興趣的人
@@ -94,7 +91,7 @@ flowchart TD
 | 項目 | 規格 | 備註 |
 |---|---|---|
 | 主機 | Raspberry Pi 4（建議 4GB RAM） | 主要計算節點 |
-| 儲存 | microSD 卡 32GB，Class 10 以上 | 系統碟 |
+| 儲存 | microSD 卡 32GB，Class 10 以上(至少要能給你的樹梅派用) | 系統碟 |
 | 讀卡機 | microSD → USB / SD | 燒錄用，一次性使用 |
 | 路由器 | 支援 Port Forwarding 的家用路由器 | 本文使用 ZyXEL PMG4506-T20B |
 | 管理電腦 | Windows / macOS / Linux 皆可 | 燒錄與 SSH 管理 |
@@ -297,7 +294,7 @@ ip link show eth0
 
 前往 [v2rayNG Releases](https://github.com/2dust/v2rayNG/releases)，下載 `arm64-v8a.apk`。掃描 X-UI 面板 QR Code 匯入節點。
 
-> ⚠️ QR Code 預設含內網 IP，需手動修改為公網 IP 或 DuckDNS 域名。
+> ⚠️ QR Code 可能預設含內網 IP，需手動修改為公網 IP 或 DuckDNS 域名。
 
 **Windows（v2rayN）**
 
