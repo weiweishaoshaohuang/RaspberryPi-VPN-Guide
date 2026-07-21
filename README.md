@@ -34,6 +34,8 @@
   - [路由器端口映射（外部 22222 → 內部 22）](#路由器端口映射外部-22222--內部-22)
   - [隱藏 X-UI 面板公網端口](#隱藏-x-ui-面板公網端口)
   - [DuckDNS 動態域名綁定](#duckdns-動態域名綁定)
+- [效能優化](#效能優化)
+  - [開啟 BBR 擁塞控制](#開啟-bbr-擁塞控制)
 - [自動化腳本](#自動化腳本)
 - [客戶端使用指南](#客戶端使用指南)
 - [附錄：名詞解釋](#附錄名詞解釋)
@@ -407,7 +409,27 @@ ssh -p 22222 YOUR_USERNAME@your-domain.duckdns.org
 ```
 
 ---
+## 效能優化
+### 開啟 BBR 擁塞控制
+* 傳統使用的為`Cubid`演算法, 遇到封包遺失就大幅降速(TCP加性增乘性減原理)
+* BBR 是 Google 開發的新演算法，會主動偵測頻寬和延遲來控制速度，在高延遲、有封包遺失的環境表現明顯更好，VPN 速度會更穩定。
 
+開啟 : 
+```bash
+echo "net.core.default_qdisc=fq" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv4.tcp_congestion_control=bbr" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+```
+
+確認是否開啟
+```bash
+sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
+```
+輸出 :
+> net.ipv4.tcp_congestion_control = bbr \
+net.core.default_qdisc = fq
+
+---
 ## 自動化腳本
 
 | 腳本 | 功能 | 執行身分 |
