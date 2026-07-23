@@ -29,6 +29,7 @@
   - [1. 燒錄 OS 至樹莓派](#1-燒錄-os-至樹莓派)
   - [2. 簡易版：Tailscale Mesh VPN 部署](#2-簡易版tailscale-mesh-vpn-部署)
   - [3. 進階版：Xray + REALITY 高隱蔽代理](#3-進階版xray--reality-高隱蔽代理)
+  - [4. 多節點備援：Cloudflare CDN 保護出口 IP](#4-多節點備援cloudflare-cdn-保護出口-ip)
 - [安全加固](#安全加固)
   - [SSH 金鑰認證 + 關閉密碼登入](#ssh-金鑰認證--關閉密碼登入)
   - [路由器端口映射（外部 22222 → 內部 22）](#路由器端口映射外部-22222--內部-22)
@@ -38,6 +39,7 @@
   - [開啟 BBR 擁塞控制](#開啟-bbr-擁塞控制)
 - [自動化腳本](#自動化腳本)
 - [客戶端使用指南](#客戶端使用指南)
+- [常見問題排除](#常見問題排除)
 - [附錄：名詞解釋](#附錄名詞解釋)
 - [免責聲明](#免責聲明)
 
@@ -301,6 +303,124 @@ ip link show eth0
 **Windows（v2rayN）**
 
 前往 [v2rayN Releases](https://github.com/2dust/v2rayN/releases) 下載並解壓縮，複製 `vless://` 連結匯入節點。
+
+---
+
+### 4. 多節點備援：Cloudflare CDN 保護出口 IP
+
+> **動機**：DuckDNS 只是單純的動態 DNS，域名查詢結果就是你家的真實公網 IP，等於把出口 IP 主動公告出去。一旦這個 IP 被 GFW 標記封鎖，整個代理就失效，得等 ISP 換發新 IP 才能恢復。
+>
+> **解法**：改用 Cloudflare 的免費 CDN（橘色雲朵代理），讓域名解析出來的是 Cloudflare 的 IP，真實家用 IP 完全不對外暴露。搭配原本的 REALITY 節點，形成「平時走 REALITY 直連（速度快），家用 IP 被封時切換至 CDN 節點（走 Cloudflare 邊緣網路）」的雙層備援。
+>
+> 這一步**不是取代** REALITY，而是多加一條命：REALITY 節點（3.3）繼續開著，Cloudflare CDN 節點是額外的逃生通道。
+
+#### 4.1 購買網域並設定 Cloudflare DDNS
+
+1. 在 [Cloudflare](https://dash.cloudflare.com/) 購買一個域名（例如 `example.com`），並將其 Nameserver 指向 Cloudflare。
+2. 到 **My Profile → API Tokens** 建立一個 Token，權限選 **Edit zone DNS**，Zone Resources 限定你的域名。
+3. 樹莓派安裝 [ddclient](https://github.com/ddclient/ddclient)，設定自動把公網 IP 更新進 Cloudflare DNS：
+
+```bash
+sudo apt install ddclient -y
+```
+
+`/etc/ddclient.conf`：
+
+```
+daemon=300
+syslog=yes
+protocol=cloudflare
+use=web
+zone=example.com
+login=token
+password=YOUR_CLOUDFLARE_API_TOKEN
+www.example.com
+```
+
+```bash
+sudo systemctl restart ddclient
+sudo systemctl status ddclient
+# 看到 SUCCESS: updating www.example.com: IPv4 address set to x.x.x.x 即代表成功
+```
+
+> ⚠️ `ddclient.conf` 含有 API Token，權限務必是 `600`（ddclient 啟動時會自動修正，但建議手動確認）。
+
+#### 4.2 子域名分流：直連節點 vs CDN 節點
+
+同一個網域下，用兩條不同的 DNS 記錄分別對應「直連」與「走 CDN」：
+
+| DNS 記錄 | Proxy 狀態（雲朵顏色） | 用途 |
+|---|---|---|
+| `home.example.com` → 家用公網 IP | 🔘 灰色（僅 DNS，不代理） | 給 REALITY 節點用，REALITY 必須直連才能完成握手，不能經過 CDN |
+| `www.example.com` → 家用公網 IP | 🟠 橘色（代理開啟） | 給 CDN 節點用，解析出來的是 Cloudflare 的 IP，隱藏真實家用 IP |
+
+> REALITY 依賴偷取目標網站的真實 TLS 憑證做握手，Cloudflare 代理會終止/改寫 TLS，兩者無法共存於同一條走 CDN 的連線上。
+
+#### 4.3 為 CDN 節點申請 SSL 憑證
+
+CDN 節點用的是標準 TLS（不是 REALITY），需要一張真的憑證。若路由器沒有對外開放 80 port，走 HTTP-01 驗證會失敗（`connect: connection timed out`），改用 **DNS-01** 驗證：
+
+```bash
+curl https://get.acme.sh | sh
+~/.acme.sh/acme.sh --issue --dns dns_cf -d www.example.com \
+  --server letsencrypt
+```
+
+> `dns_cf` 需要 Cloudflare 的 **Global API Key**（不是前面 DDNS 用的 API Token），在 Cloudflare 個人資料頁取得，並設定環境變數 `CF_Key` / `CF_Email` 後再執行上述指令。
+
+憑證簽發後複製到固定路徑，供 Xray 讀取：
+
+```bash
+sudo mkdir -p /root/cert/www.example.com
+sudo cp ~/.acme.sh/www.example.com_ecc/fullchain.cer /root/cert/www.example.com/fullchain.pem
+sudo cp ~/.acme.sh/www.example.com_ecc/www.example.com.key /root/cert/www.example.com/privkey.pem
+sudo chmod 600 /root/cert/www.example.com/privkey.pem
+```
+
+Let's Encrypt 憑證效期 90 天，acme.sh 預設會裝 cron 自動續期。
+
+#### 4.4 新增入站：VLESS + XHTTP + TLS + Cloudflare
+
+在 X-UI 新增入站，注意 Xray 已**棄用 WebSocket**，官方建議一律改用 **XHTTP**（同時支援 HTTP/2 與 HTTP/3，效能更好且與 CDN 相容性佳）：
+
+| 欄位 | 值 |
+|---|---|
+| 協議 | vless |
+| 端口 | 2083（Cloudflare 支援代理的固定 HTTPS 端口之一，另有 443 / 2087 / 2096 / 8443） |
+| 傳輸 | **xhttp** |
+| Path | 自訂，例如 `/somepath` |
+| 安全 | TLS |
+| 憑證 | `/root/cert/www.example.com/fullchain.pem`、`privkey.pem` |
+
+路由器 Port Forwarding 新增一條：外部 `2083` → Pi 內部 `2083`。
+
+#### 4.5 Cloudflare SSL/TLS 模式：務必選 Full（Strict）
+
+| 模式 | CF ↔ 你的伺服器 | 是否適用 |
+|---|---|---|
+| Flexible | CF 只會用 **HTTP:80** 連你的源站 | ❌ 你的 Xray 監聽的是 2083 且開了 TLS，Flexible 永遠連不到 |
+| Full | CF 用 HTTPS 連源站的**同一個 port**，不驗證憑證真偽 | ✅ 可用 |
+| Full (Strict) | 同上，且**要求憑證必須是受信任 CA 簽發** | ✅ **建議**，配合 4.3 的 Let's Encrypt 憑證使用 |
+
+若模式與伺服器 TLS 設定不匹配，最常見的症狀是 **Error 525（SSL Handshake Failed）**。
+
+#### 4.6 客戶端連結範例
+
+```
+vless://<UUID>@www.example.com:2083?encryption=none&security=tls&sni=www.example.com&type=xhttp&path=%2Fsomepath&host=www.example.com&mode=auto#CDN備援節點
+```
+
+> ⚠️ 若從 X-UI 面板直接匯出 QR Code / 連結，**位址欄位預設會是你當下登入面板所用的位址**（例如區網 IP `192.168.1.x`），且 `sni` 常常是空的。用網域跑 CDN 節點時，務必手動把 `address`、`host`、`sni` 三個欄位都改成你的網域，否則連得上 TCP 但 TLS/SNI 對不上，一樣無法使用。
+
+#### 4.7 最終多節點架構
+
+| 節點 | 傳輸 | 監聽 Port | 是否走 CDN | 用途 | `flow` |
+|---|---|---|---|---|---|
+| 節點1 | TCP + REALITY | 443 | 否，直連 | 主力，速度最快、隱蔽性最高 | `xtls-rprx-vision` |
+| 節點2 | XHTTP + REALITY | 25045（非標準端口）| 否，直連 | 備援，非 443 較不易被針對性掃描，但也更容易被當成可疑端口 | 不設定 |
+| 節點3 | XHTTP + TLS | 2083 | 是，經 Cloudflare | 家用 IP 被 GFW 封鎖時的最後備援 | 不設定 |
+
+> `flow: xtls-rprx-vision` **只適用於「原始 TCP + REALITY/TLS」傳輸**，靠 XTLS 把內外層 TLS 封包拼接消除雙層 TLS 特徵。XHTTP 傳輸完全不支援 flow，設定了也不會生效，務必留空。
 
 ---
 
@@ -607,6 +727,67 @@ Flow 有個特性：Server 和 Client 必須同時設或同時不設，否則直
 
 ---
 
+### 問題三：REALITY 的偽裝目標（Target）用大型 CDN 網站，握手間歇性失敗
+> 不要用Microsoft
+
+**症狀**：Server 端日誌（`x-ui log` 或 `journalctl -u x-ui`）出現大量：
+
+```
+REALITY: processed invalid connection from x.x.x.x:xxxx: handshake did not complete successfully
+```
+
+Client 明明帶著正確的 UUID / Public Key / Short ID，TCP 也連得上（`telnet` / TCPing 有回應），但就是連不上代理，且 `access.log` 完全沒有這個連線的紀錄（因為 REALITY 判定驗證失敗時，會直接把流量原樣轉發給偽裝目標，不會當作代理連線記錄）。
+
+**根本原因**：
+
+REALITY 的原理是伺服器主動連到 `target`（例如 `www.microsoft.com:443`）幫客戶端「偷」一份真實的 TLS 憑證。如果 `target` 是走 **Azure Front Door / 大型 Anycast CDN** 這類「同網域背後有一大群、且會依請求來源動態調度的邊緣伺服器」的網站，你的樹莓派每次連出去拿到的憑證/TLS Session 都可能落在不同台機器上，尤其手機用行動網路連進來時（電信商的出口路由本身就不穩定），伺服器端與客戶端兩邊對應到的「真實站點狀態」對不起來，就會讓 REALITY 的驗證邏輯判定為無效連線。
+
+**解決方式**：把 `target` / `serverNames` 換成**單一來源、非大型 CDN** 的網站，社群回報較穩定的選擇例如 `addons.mozilla.org`。X-UI 入站編輯畫面裡的 REALITY 設定：
+
+| 欄位 | 原本（不穩定） | 建議改成 |
+|---|---|---|
+| Dest / Target | `www.microsoft.com:443` | `addons.mozilla.org:443` |
+| ServerNames | `www.microsoft.com` | `addons.mozilla.org` |
+
+改完後，**Client 連結裡的 `sni` 也要一併同步修改**，否則兩邊仍然對不上。
+
+---
+
+### 問題四：在家用 Wi-Fi 下用「自己家裡的公網 IP」連自己的節點，完全連不上（NAT 迴環）
+
+**症狀**：手機連著家裡 Wi-Fi，VPN 設定填的是家用公網 IP，TCPing 測試顯示逾時或連不上；但用線上工具從外部測試同一個 IP/Port 卻是通的。
+
+**根本原因**：這是路由器對 **NAT Hairpin（NAT 迴環）** 支援不完整的典型症狀——同一台路由器底下的裝置，用「自己的公網 IP」回頭連接同樣在這台路由器底下的伺服器，很多消費級路由器不會正確處理這種「繞一圈回自己家」的封包。這不是 Port Forwarding 設定錯誤，外部連線完全不受影響。
+
+**解決方式**：在家測試時**直接用手機行動數據**（關閉 Wi-Fi），脫離家用路由器的網路環境再測試；或者幫家用 IP 額外設一條 DNS Split（區網內解析成內網 IP，區網外才解析成公網 IP），但這需要自架 DNS，對一般家用環境來說直接用行動數據測試更省事。
+
+---
+
+### 問題五：3X-UI 大版本更新後，面板路徑與存取方式改變
+
+**症狀**：執行 `sudo x-ui` → 選項 `2. Update` 更新面板後，原本的 `http://PI_IP:PORT/panel/xray` 網址打不開了。
+
+**根本原因**：3X-UI 從 2.x 更新到 3.x 之後，若偵測不到可用的 SSL 憑證（例如路由器沒開放 80 port，Let's Encrypt 驗證失敗），會自動產生一組**隨機字串當作新的 Web Base Path**，取代原本固定的 `/panel/xray`，作為額外的安全機制（避免面板路徑被掃描猜到）。更新過程的輸出訊息會直接印出新路徑，例如：
+
+```
+New WebBasePath: JO8aoW24hSOsFPZoij
+Access URL: https://YOUR_IP:2053/JO8aoW24hSOsFPZoij
+```
+
+**解決方式**：更新前先截圖/記錄目前設定；更新後改用輸出訊息裡給的新網址登入（若 SSL 憑證簽發失敗，只能用 `http://` 而非 `https://` 存取）。也可以用 `sudo x-ui settings` 隨時查詢目前的 Web Base Path。
+
+---
+
+### 問題六：X-UI 匯出的連結，位址欄位跟你當下登入面板的方式綁在一起
+
+**症狀**：明明伺服器設定是網域（CDN 節點），用面板「產生 QR Code」功能匯出後掃到手機，連結裡的伺服器位址卻是內網 IP（如 `192.168.1.109`），而且 `sni` 是空的。
+
+**根本原因**：X-UI 產生分享連結時，伺服器位址欄位預設抓的是**你瀏覽器目前用來存取面板的那個位址**，而不是你在入站設定裡填的憑證網域。如果你是用區網 IP 登入面板（例如透過 Tailscale 或區網直連），匯出的連結自然也會是那個區網 IP。
+
+**解決方式**：CDN／網域類型的節點，匯出連結後**務必手動檢查並修正三個欄位**：`address`（伺服器位址）、`host`、`sni`，改成實際的網域名稱，才能讓 TLS SNI 正確送達 Cloudflare／伺服器。
+
+---
+
 ## 附錄：名詞解釋
 
 ### GFW 的識別手段
@@ -633,6 +814,17 @@ Shadowsocks → VMess → Trojan → VLess → REALITY
 | Trojan | 完整模仿 HTTPS，在 443 監聽 | ⚠️ 部分環境下被識別 |
 | VLESS | VMess 輕量化，解耦加密與傳輸 | ✅ 需搭配 REALITY |
 | **REALITY** | 借用真實域名 TLS 憑證，無法與正常 HTTPS 區分 | ✅ **目前最高隱蔽性** |
+| Hysteria2 | 基於 QUIC / UDP，自帶類 BBR 壅塞控制 | ⚠️ 見下方評估 |
+
+#### 關於 Hysteria2：值得加嗎？
+
+Hysteria2 在高延遲、高丟包的線路上速度表現通常優於任何 TCP-based 方案，是很有吸引力的選項，但實際評估後**不建議作為主力**，只適合當「額外的備用方案」：
+
+- **UDP 更容易被針對性限速／封鎖**：許多電信商（尤其行動網路）對 UDP 流量本身就有 QoS 限速或節流策略，跟 GFW 主動封鎖無關，日常使用就可能不穩定。
+- **無法藏在免費 CDN 後面**：Cloudflare 免費方案的 CDN 代理只支援 TCP，UDP/QUIC 流量無法走「橘色雲朵」隱藏來源 IP，因此 Hysteria2 節點必然直接暴露家用 IP，等於重複了 REALITY 節點已有的曝險，卻少了 REALITY 那種「主動探測也測不出破綻」的偽裝能力。
+- **好處是風險隔離**：GFW／電信商對不同 Port、不同協議是分開偵測的，就算 Hysteria2 節點被針對性封鎖，也不會連累同一台主機上的 REALITY 節點或 CDN 節點，頂多損失這一個備援選項。
+
+結論：如果主要訴求是「在不穩定、高延遲的國際線路上榨出更快的速度」，值得一試；如果只是想多一層防封鎖備援，現有的 REALITY 直連 + Cloudflare CDN 兩層組合已經足夠，Hysteria2 不會帶來額外的抗封鎖效果。
 
 ### 系統代理 vs TUN 模式（原理）
 
